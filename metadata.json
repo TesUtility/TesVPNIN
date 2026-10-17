@@ -1,0 +1,6 @@
+{
+  "name": "TESVPN",
+  "description": "TESVPN client for Xray and V2Ray configurations supporting VMess, VLESS, and Trojan protocols with QR code scanning.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
