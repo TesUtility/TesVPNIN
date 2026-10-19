@@ -161,4 +161,59 @@ class ExampleRobolectricTest {
         val result = reader.decode(binaryBitmap)
         assertEquals(testContent, result.text)
     }
+
+    @Test
+    fun `test v2ray config builder generates valid json and no illegal geosite rules`() {
+        val config = com.example.model.ProxyConfig(
+            id = "cfg-1",
+            name = "TestNode",
+            protocol = ProxyProtocol.VLESS,
+            server = "vpn.example.com",
+            port = 443,
+            uuidOrPassword = "e68f3a38-51f4-4a49-92bb-18753d0bc261",
+            security = "reality",
+            sni = "gateway.example.com",
+            publicKey = "pbk123"
+        )
+
+        for (mode in listOf("BYPASS_LAN", "PROXY_ALL", "DIRECT")) {
+            val jsonStr = com.example.service.v2ray.V2rayConfigBuilder.buildConfig(
+                config = config,
+                routingMode = mode,
+                dnsServer = "1.1.1.1"
+            )
+            assertNotNull(jsonStr)
+            val json = org.json.JSONObject(jsonStr)
+            assertTrue(json.has("inbounds"))
+            assertTrue(json.has("outbounds"))
+            assertTrue(json.has("routing"))
+
+            // Verify no invalid geosite rules exist
+            val rawString = jsonStr.lowercase()
+            org.junit.Assert.assertFalse("Config should not contain geosite:ru", rawString.contains("geosite:ru"))
+            org.junit.Assert.assertFalse("Config should not contain geosite:private", rawString.contains("geosite:private"))
+
+            // Verify native TUN inbound is present
+            val inbounds = json.getJSONArray("inbounds")
+            var hasTun = false
+            for (i in 0 until inbounds.length()) {
+                val inb = inbounds.getJSONObject(i)
+                if (inb.optString("protocol") == "tun" && inb.optString("tag") == "tun") {
+                    hasTun = true
+                }
+            }
+            assertTrue("Should contain native tun inbound", hasTun)
+
+            // Verify dns-out outbound is present
+            val outbounds = json.getJSONArray("outbounds")
+            var hasDnsOut = false
+            for (i in 0 until outbounds.length()) {
+                val out = outbounds.getJSONObject(i)
+                if (out.optString("protocol") == "dns" && out.optString("tag") == "dns-out") {
+                    hasDnsOut = true
+                }
+            }
+            assertTrue("Should contain dns-out outbound", hasDnsOut)
+        }
+    }
 }

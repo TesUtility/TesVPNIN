@@ -36,17 +36,40 @@ class V2rayCoreManager(
         }
     }
 
+    companion object {
+        private val initialized = java.util.concurrent.atomic.AtomicBoolean(false)
+
+        private fun getDeviceIdForXUDPBaseKey(context: Context): String {
+            return try {
+                val androidId = (android.provider.Settings.Secure.getString(
+                    context.contentResolver,
+                    android.provider.Settings.Secure.ANDROID_ID
+                ) ?: "tesvpn-android-default-device-id").toByteArray(Charsets.UTF_8)
+                android.util.Base64.encodeToString(
+                    androidId.copyOf(32),
+                    android.util.Base64.NO_PADDING or android.util.Base64.URL_SAFE or android.util.Base64.NO_WRAP
+                ).trim()
+            } catch (_: Exception) {
+                ""
+            }
+        }
+    }
+
     init {
-        try {
-            Seq.setContext(context.applicationContext)
-            ensureDataAssets()
-            val assetPath = context.filesDir.absolutePath
-            val cachePath = context.cacheDir.absolutePath
-            Libv2ray.initCoreEnv(assetPath, cachePath)
-            val ver = try { Libv2ray.checkVersionX() } catch (_: Throwable) { "v26.10.10" }
-            onLog("INFO", "libv2ray.aar подключен. Версия Xray-core: $ver")
-        } catch (e: Throwable) {
-            onLog("WARN", "libv2ray инициализация: ${e.message}")
+        if (initialized.compareAndSet(false, true)) {
+            try {
+                Seq.setContext(context.applicationContext)
+                ensureDataAssets()
+                val assetPath = context.filesDir.absolutePath
+                val deviceId = getDeviceIdForXUDPBaseKey(context)
+                Libv2ray.initCoreEnv(assetPath, deviceId)
+                val ver = try { Libv2ray.checkVersionX() } catch (_: Throwable) { "v26.10.17" }
+                onLog("INFO", "libv2ray.aar подключен. Версия Xray-core: $ver")
+            } catch (e: Throwable) {
+                initialized.set(false)
+                val err = e.message ?: e.cause?.message ?: e.javaClass.simpleName
+                onLog("WARN", "libv2ray инициализация: $err")
+            }
         }
     }
 
@@ -54,7 +77,18 @@ class V2rayCoreManager(
         val files = listOf("geoip.dat", "geosite.dat", "geoip-only-cn-private.dat")
         for (fName in files) {
             val target = File(context.filesDir, fName)
-            if (!target.exists() || target.length() == 0L) {
+            var needCopy = !target.exists() || target.length() == 0L
+            if (!needCopy) {
+                try {
+                    val fd = context.assets.openFd(fName)
+                    val expectedLen = fd.length
+                    fd.close()
+                    if (target.length() != expectedLen) {
+                        needCopy = true
+                    }
+                } catch (_: Exception) {}
+            }
+            if (needCopy) {
                 try {
                     context.assets.open(fName).use { input ->
                         FileOutputStream(target).use { output ->
@@ -68,7 +102,7 @@ class V2rayCoreManager(
         }
     }
 
-    fun start(config: ProxyConfig, routingMode: String, dnsServer: String): Boolean {
+    fun start(config: ProxyConfig, routingMode: String, dnsServer: String, tunFd: Int = 0): Boolean {
         return try {
             stop()
             val configJson = V2rayConfigBuilder.buildConfig(
@@ -81,13 +115,14 @@ class V2rayCoreManager(
             )
 
             val ctrl = Libv2ray.newCoreController(callbackHandler)
-            ctrl.startLoop(configJson, -1)
+            ctrl.startLoop(configJson, tunFd)
             controller = ctrl
             isRunning = true
-            onLog("INFO", "Xray-core активен: SOCKS:10808, HTTP:10809, DNS:10853")
+            onLog("INFO", "Xray-core активен: TUN(fd=$tunFd), SOCKS:10808, HTTP:10809")
             true
         } catch (e: Throwable) {
-            onLog("ERROR", "Ошибка запуска libv2ray: ${e.message}")
+            val msg = e.message ?: e.cause?.message ?: e.javaClass.simpleName
+            onLog("ERROR", "Ошибка запуска libv2ray: $msg")
             isRunning = false
             false
         }
@@ -123,6 +158,18 @@ class V2rayCoreManager(
 
     private fun parseTrafficStat(stats: String, direction: String): Long {
         return try {
+            var sum = 0L
+            // Handle semicolon-delimited stats: tag,direction,value;tag,direction,value;
+            stats.split(';').forEach { entry ->
+                if (entry.isBlank()) return@forEach
+                val parts = entry.split(',', limit = 3)
+                if (parts.size == 3 && parts[1].equals(direction, ignoreCase = true)) {
+                    sum += parts[2].trim().toLongOrNull() ?: 0L
+                }
+            }
+            if (sum > 0L) return sum
+
+            // Fallback for line-separated stats: proxy>>>downlink>>>12345
             for (line in stats.lines()) {
                 if (line.contains(direction, ignoreCase = true)) {
                     val num = line.filter { it.isDigit() }

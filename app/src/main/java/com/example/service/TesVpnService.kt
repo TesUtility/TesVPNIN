@@ -184,27 +184,29 @@ class TesVpnService : VpnService() {
                 uuidOrPassword = ""
             )
 
-            // 1. Start Xray-core / libv2ray.aar
-            v2rayCore?.stop()
-            val core = V2rayCoreManager(this@TesVpnService) { level, msg ->
-                log(level, msg)
-            }
-            v2rayCore = core
-
-            val coreStarted = core.start(currentCfg, routingMode, dns)
-            if (!coreStarted) {
-                log("WARN", "Предупреждение: libv2ray ядро ответило ошибкой запуска")
-            }
-
-            // 2. Establish Android VpnService TUN interface
-            try {
+            // 1. Establish Android VpnService TUN interface first
+            val pfd: ParcelFileDescriptor? = try {
                 val builder = Builder()
                     .setMtu(1500)
-                    .addAddress("10.0.0.2", 24)
+                    .addAddress("10.10.14.1", 24)
                     .addRoute("0.0.0.0", 0)
                     .addDnsServer(dns)
                     .addDnsServer("8.8.8.8")
                     .setSession("TESVPN - $configName")
+
+                // Route IPv6 into VPN tunnel to prevent IPv6 traffic from leaking to ISP
+                try {
+                    builder.addAddress("fc00::10:10:14:1", 126)
+                    builder.addRoute("::", 0)
+                } catch (e: Exception) {
+                    log("WARN", "IPv6 route: ${e.message}")
+                }
+
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                    try {
+                        builder.setMetered(false)
+                    } catch (_: Exception) {}
+                }
 
                 // Prevent routing loops: exclude app's own process from VPN tunnel
                 try {
@@ -221,37 +223,45 @@ class TesVpnService : VpnService() {
                 )
                 builder.setConfigureIntent(pendingIntent)
 
-                vpnInterface = builder.establish()
-                if (vpnInterface != null) {
-                    log("INFO", "Интерфейс tun0 поднят. Перенаправление трафика через libv2ray активно.")
-
-                    packetEngine?.stop()
-                    packetEngine = PacketEngine(
-                        vpnService = this@TesVpnService,
-                        tunFd = vpnInterface!!.fileDescriptor,
-                        config = currentCfg,
-                        dnsServerIp = dns,
-                        onTraffic = { _, _ -> },
-                        onLog = { level, msg ->
-                            log(level, msg)
-                        }
-                    )
-                    packetEngine?.start()
-                } else {
-                    log("WARN", "tun интерфейс не выделился системой.")
-                }
-
-                _connectionStatus.value = ConnectionStatus.CONNECTED
-                log("INFO", "TESVPN успешно подключен! Защита активна.")
-                startHeartbeat(configName)
+                builder.establish()
             } catch (e: Exception) {
-                log("ERROR", "Ошибка запуска VPN туннеля: ${e.message}")
+                log("ERROR", "Ошибка создания tun интерфейса: ${e.message}")
+                null
+            }
+
+            if (pfd == null) {
+                log("ERROR", "tun интерфейс не выделился системой. Проверьте VPN разрешение.")
                 _connectionStatus.value = ConnectionStatus.DISCONNECTED
                 _connectedConfig.value = null
-                v2rayCore?.stop()
-                v2rayCore = null
                 stopSelf()
+                return@launch
             }
+
+            vpnInterface = pfd
+            val tunFd = pfd.fd
+            log("INFO", "Интерфейс tun0 поднят (fd=$tunFd). Перенаправление трафика через Xray-core...")
+
+            // 2. Start Xray-core / libv2ray.aar with native TUN attached
+            v2rayCore?.stop()
+            val core = V2rayCoreManager(this@TesVpnService) { level, msg ->
+                log(level, msg)
+            }
+            v2rayCore = core
+
+            val coreStarted = core.start(currentCfg, routingMode, dns, tunFd)
+            if (!coreStarted) {
+                log("ERROR", "libv2ray ядро не смогло запуститься с конфигурацией")
+                try { pfd.close() } catch (_: Exception) {}
+                vpnInterface = null
+                _connectionStatus.value = ConnectionStatus.DISCONNECTED
+                _connectedConfig.value = null
+                stopSelf()
+                return@launch
+            }
+
+            _connectionStatus.value = ConnectionStatus.CONNECTED
+            log("INFO", "TESVPN успешно подключен! Защита активна.")
+            startHeartbeat(configName)
         }
     }
 
@@ -260,31 +270,41 @@ class TesVpnService : VpnService() {
         durationSeconds = 0
 
         statsJob = serviceScope.launch {
-            var lastDownBytes = 0L
-            var lastUpBytes = 0L
+            var totalDownBytes = 0L
+            var totalUpBytes = 0L
 
             while (isActive) {
                 delay(1000)
                 durationSeconds++
 
-                // Query accurate traffic from libv2ray core stats, with fallback to packet engine counters
+                // Query traffic from libv2ray core stats
                 val coreDown = v2rayCore?.queryDownlinkBytes() ?: 0L
                 val coreUp = v2rayCore?.queryUplinkBytes() ?: 0L
 
-                val totalDown = if (coreDown > 0L) coreDown else packetEngine?.totalDownBytes?.get() ?: 0L
-                val totalUp = if (coreUp > 0L) coreUp else packetEngine?.totalUpBytes?.get() ?: 0L
+                val downSpeed: Long
+                val upSpeed: Long
 
-                val downSpeed = if (totalDown >= lastDownBytes) totalDown - lastDownBytes else 0L
-                val upSpeed = if (totalUp >= lastUpBytes) totalUp - lastUpBytes else 0L
+                if (coreDown >= totalDownBytes && totalDownBytes > 0L) {
+                    downSpeed = coreDown - totalDownBytes
+                    totalDownBytes = coreDown
+                } else {
+                    downSpeed = coreDown
+                    totalDownBytes += coreDown
+                }
 
-                lastDownBytes = totalDown
-                lastUpBytes = totalUp
+                if (coreUp >= totalUpBytes && totalUpBytes > 0L) {
+                    upSpeed = coreUp - totalUpBytes
+                    totalUpBytes = coreUp
+                } else {
+                    upSpeed = coreUp
+                    totalUpBytes += coreUp
+                }
 
                 _trafficStats.value = TrafficStats(
                     uploadSpeedBps = upSpeed,
                     downloadSpeedBps = downSpeed,
-                    totalUploadedBytes = totalUp,
-                    totalDownloadedBytes = totalDown,
+                    totalUploadedBytes = totalUpBytes,
+                    totalDownloadedBytes = totalDownBytes,
                     connectedDurationSeconds = durationSeconds
                 )
 

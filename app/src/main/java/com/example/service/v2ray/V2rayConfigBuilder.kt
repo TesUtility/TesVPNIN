@@ -23,9 +23,30 @@ object V2rayConfigBuilder {
         }
         root.put("log", logObj)
 
-        // 2. Inbounds (SOCKS5, HTTP, and Dokodemo-door for DNS)
+        // 2. Inbounds (Native TUN, SOCKS5, HTTP, and Dokodemo-door for DNS)
         val inbounds = JSONArray()
 
+        // 2a. Native TUN inbound (attached to Android VpnService tunFd)
+        val tunInbound = JSONObject().apply {
+            put("tag", "tun")
+            put("protocol", "tun")
+            put("settings", JSONObject().apply {
+                put("name", "xray0")
+                put("MTU", 1500)
+                put("userLevel", 8)
+            })
+            put("sniffing", JSONObject().apply {
+                put("enabled", true)
+                put("destOverride", JSONArray().apply {
+                    put("http")
+                    put("tls")
+                    put("quic")
+                })
+            })
+        }
+        inbounds.put(tunInbound)
+
+        // 2b. Local SOCKS5 inbound
         val socksInbound = JSONObject().apply {
             put("tag", "socks-in")
             put("port", socksPort)
@@ -36,15 +57,18 @@ object V2rayConfigBuilder {
                 put("destOverride", JSONArray().apply {
                     put("http")
                     put("tls")
+                    put("quic")
                 })
             })
             put("settings", JSONObject().apply {
                 put("auth", "noauth")
                 put("udp", true)
+                put("userLevel", 8)
             })
         }
         inbounds.put(socksInbound)
 
+        // 2c. Local HTTP inbound
         val httpInbound = JSONObject().apply {
             put("tag", "http-in")
             put("port", httpPort)
@@ -81,6 +105,11 @@ object V2rayConfigBuilder {
             put("tag", "direct")
             put("protocol", "freedom")
             put("settings", JSONObject())
+            put("streamSettings", JSONObject().apply {
+                put("sockopt", JSONObject().apply {
+                    put("domainStrategy", "UseIP")
+                })
+            })
         }
         outbounds.put(directOutbound)
 
@@ -90,14 +119,25 @@ object V2rayConfigBuilder {
             put("settings", JSONObject())
         }
         outbounds.put(blockOutbound)
+
+        // 3d. DNS outbound (intercepts port 53 queries and feeds them to Xray's DNS engine)
+        val dnsOutbound = JSONObject().apply {
+            put("tag", "dns-out")
+            put("protocol", "dns")
+        }
+        outbounds.put(dnsOutbound)
+
         root.put("outbounds", outbounds)
 
-        // 4. DNS Configuration in Xray
+        // 4. DNS Configuration in Xray (DoH over proxy + fast IP resolvers)
         val dnsObj = JSONObject().apply {
-            val servers = JSONArray()
-            servers.put(targetDns)
-            servers.put("8.8.8.8")
-            servers.put("localhost")
+            val servers = JSONArray().apply {
+                put("https://1.1.1.1/dns-query")
+                put("https://8.8.8.8/dns-query")
+                put(targetDns)
+                put("8.8.8.8")
+                put("1.1.1.1")
+            }
             put("servers", servers)
         }
         root.put("dns", dnsObj)
@@ -107,16 +147,54 @@ object V2rayConfigBuilder {
             put("domainStrategy", "IPIfNonMatch")
             val rules = JSONArray()
 
-            // DNS inbound traffic goes to proxy to bypass ISP DNS censorship
-            val dnsProxyRule = JSONObject().apply {
+            // 5a. Intercept port 53 DNS queries arriving from TUN into the dns-out engine
+            val dnsPortRule = JSONObject().apply {
+                put("type", "field")
+                put("inboundTag", JSONArray().apply { put("tun") })
+                put("port", "53")
+                put("outboundTag", "dns-out")
+            }
+            rules.put(dnsPortRule)
+
+            val dnsInboundRule = JSONObject().apply {
                 put("type", "field")
                 put("inboundTag", JSONArray().apply { put("dns-in") })
-                put("outboundTag", if (routingMode == "DIRECT") "direct" else "proxy")
+                put("port", "53")
+                put("outboundTag", "dns-out")
             }
-            rules.put(dnsProxyRule)
+            rules.put(dnsInboundRule)
+
+            // 5b. Block UDP port 443 (QUIC) so YouTube and browsers immediately use TLS/TCP (HTTP/2)
+            val blockQuicRule = JSONObject().apply {
+                put("type", "field")
+                put("port", "443")
+                put("network", "udp")
+                put("outboundTag", "block")
+            }
+            rules.put(blockQuicRule)
+
+            // 5c. Route Xray internal DNS queries through proxy so DoH is encrypted and bypasses censorship
+            val dnsThroughProxyRule = JSONObject().apply {
+                put("type", "field")
+                put("inboundTag", JSONArray().apply { put("dns") })
+                put("outboundTag", "proxy")
+            }
+            rules.put(dnsThroughProxyRule)
+
+            val dnsServerIpRule = JSONObject().apply {
+                put("type", "field")
+                put("ip", JSONArray().apply {
+                    put("1.1.1.1")
+                    put("8.8.8.8")
+                    put("1.0.0.1")
+                    put("8.8.4.4")
+                })
+                put("outboundTag", "proxy")
+            }
+            rules.put(dnsServerIpRule)
 
             if (routingMode == "BYPASS_LAN") {
-                val privateIpRule = JSONObject().apply {
+                val lanIpRule = JSONObject().apply {
                     put("type", "field")
                     put("outboundTag", "direct")
                     put("ip", JSONArray().apply {
@@ -126,10 +204,24 @@ object V2rayConfigBuilder {
                         put("127.0.0.0/8")
                         put("fc00::/7")
                         put("fe80::/10")
-                        put("geoip:private")
+                        put("geoip:ru")
                     })
                 }
-                rules.put(privateIpRule)
+                rules.put(lanIpRule)
+
+                val directDomainRule = JSONObject().apply {
+                    put("type", "field")
+                    put("outboundTag", "direct")
+                    put("domain", JSONArray().apply {
+                        put("domain:ru")
+                        put("domain:su")
+                        put("domain:xn--p1ai")
+                        put("domain:local")
+                        put("domain:localhost")
+                        put("domain:lan")
+                    })
+                }
+                rules.put(directDomainRule)
             } else if (routingMode == "DIRECT") {
                 val defaultDirect = JSONObject().apply {
                     put("type", "field")
@@ -139,7 +231,7 @@ object V2rayConfigBuilder {
                 rules.put(defaultDirect)
             }
 
-            // Default proxy rule
+            // Default proxy rule for all remaining internet traffic
             val defaultProxy = JSONObject().apply {
                 put("type", "field")
                 put("outboundTag", "proxy")

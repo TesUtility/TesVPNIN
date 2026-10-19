@@ -113,7 +113,7 @@ object ProxyParser {
             val pbk = uri.getQueryParameter("pbk") ?: ""
             val sid = uri.getQueryParameter("sid") ?: ""
             val spx = uri.getQueryParameter("spx") ?: ""
-            val flow = uri.getQueryParameter("flow") ?: "xtls-rprx-vision"
+            val flow = uri.getQueryParameter("flow") ?: ""
             val alpn = uri.getQueryParameter("alpn") ?: ""
             val path = uri.getQueryParameter("path") ?: ""
             val wsHost = uri.getQueryParameter("host") ?: ""
