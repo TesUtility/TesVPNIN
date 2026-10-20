@@ -188,19 +188,11 @@ class TesVpnService : VpnService() {
             val pfd: ParcelFileDescriptor? = try {
                 val builder = Builder()
                     .setMtu(1500)
-                    .addAddress("10.10.14.1", 24)
+                    .addAddress("10.10.14.1", 30)
                     .addRoute("0.0.0.0", 0)
-                    .addDnsServer(dns)
+                    .addDnsServer(if (dns.isNotBlank()) dns else "1.1.1.1")
                     .addDnsServer("8.8.8.8")
                     .setSession("TESVPN - $configName")
-
-                // Route IPv6 into VPN tunnel to prevent IPv6 traffic from leaking to ISP
-                try {
-                    builder.addAddress("fc00::10:10:14:1", 126)
-                    builder.addRoute("::", 0)
-                } catch (e: Exception) {
-                    log("WARN", "IPv6 route: ${e.message}")
-                }
 
                 if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
                     try {

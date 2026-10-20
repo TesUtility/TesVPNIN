@@ -1,4 +1,7 @@
 import com.google.gms.googleservices.GoogleServicesPlugin.MissingGoogleServicesStrategy
+import java.net.URI
+import java.nio.file.Files
+import java.nio.file.StandardCopyOption
 
 plugins {
   alias(libs.plugins.android.application)
@@ -73,6 +76,23 @@ android {
     includeInApk = false
     includeInBundle = true
   }
+}
+
+tasks.register("ensureLibV2Ray") {
+  val aarFile = file("libs/libv2ray.aar")
+  outputs.file(aarFile)
+  doLast {
+    if (!aarFile.exists() || aarFile.length() < 10_000_000L) {
+      println("Downloading full libv2ray.aar from releases...")
+      val url = URI("https://github.com/2dust/AndroidLibXrayLite/releases/download/v26.10.17/libv2ray.aar").toURL()
+      url.openStream().use { input ->
+        Files.copy(input, aarFile.toPath(), StandardCopyOption.REPLACE_EXISTING)
+      }
+    }
+  }
+}
+tasks.matching { it.name in listOf("preBuild", "preDebugBuild", "compileDebugKotlin") }.configureEach {
+  dependsOn("ensureLibV2Ray")
 }
 
 // Configure the Secrets Gradle Plugin to use .env and .env.example files

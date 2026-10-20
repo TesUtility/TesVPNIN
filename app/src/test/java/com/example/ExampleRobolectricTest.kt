@@ -204,16 +204,17 @@ class ExampleRobolectricTest {
             }
             assertTrue("Should contain native tun inbound", hasTun)
 
-            // Verify dns-out outbound is present
+            // Verify proxy, direct and block outbounds are present
             val outbounds = json.getJSONArray("outbounds")
-            var hasDnsOut = false
+            var hasProxy = false
+            var hasDirect = false
             for (i in 0 until outbounds.length()) {
                 val out = outbounds.getJSONObject(i)
-                if (out.optString("protocol") == "dns" && out.optString("tag") == "dns-out") {
-                    hasDnsOut = true
-                }
+                if (out.optString("tag") == "proxy") hasProxy = true
+                if (out.optString("tag") == "direct") hasDirect = true
             }
-            assertTrue("Should contain dns-out outbound", hasDnsOut)
+            assertTrue("Should contain proxy outbound", hasProxy)
+            assertTrue("Should contain direct outbound", hasDirect)
         }
     }
 }

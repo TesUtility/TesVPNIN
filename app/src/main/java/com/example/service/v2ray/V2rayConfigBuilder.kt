@@ -120,20 +120,11 @@ object V2rayConfigBuilder {
         }
         outbounds.put(blockOutbound)
 
-        // 3d. DNS outbound (intercepts port 53 queries and feeds them to Xray's DNS engine)
-        val dnsOutbound = JSONObject().apply {
-            put("tag", "dns-out")
-            put("protocol", "dns")
-        }
-        outbounds.put(dnsOutbound)
-
         root.put("outbounds", outbounds)
 
-        // 4. DNS Configuration in Xray (DoH over proxy + fast IP resolvers)
+        // 4. DNS Configuration in Xray
         val dnsObj = JSONObject().apply {
             val servers = JSONArray().apply {
-                put("https://1.1.1.1/dns-query")
-                put("https://8.8.8.8/dns-query")
                 put(targetDns)
                 put("8.8.8.8")
                 put("1.1.1.1")
@@ -146,52 +137,6 @@ object V2rayConfigBuilder {
         val routing = JSONObject().apply {
             put("domainStrategy", "IPIfNonMatch")
             val rules = JSONArray()
-
-            // 5a. Intercept port 53 DNS queries arriving from TUN into the dns-out engine
-            val dnsPortRule = JSONObject().apply {
-                put("type", "field")
-                put("inboundTag", JSONArray().apply { put("tun") })
-                put("port", "53")
-                put("outboundTag", "dns-out")
-            }
-            rules.put(dnsPortRule)
-
-            val dnsInboundRule = JSONObject().apply {
-                put("type", "field")
-                put("inboundTag", JSONArray().apply { put("dns-in") })
-                put("port", "53")
-                put("outboundTag", "dns-out")
-            }
-            rules.put(dnsInboundRule)
-
-            // 5b. Block UDP port 443 (QUIC) so YouTube and browsers immediately use TLS/TCP (HTTP/2)
-            val blockQuicRule = JSONObject().apply {
-                put("type", "field")
-                put("port", "443")
-                put("network", "udp")
-                put("outboundTag", "block")
-            }
-            rules.put(blockQuicRule)
-
-            // 5c. Route Xray internal DNS queries through proxy so DoH is encrypted and bypasses censorship
-            val dnsThroughProxyRule = JSONObject().apply {
-                put("type", "field")
-                put("inboundTag", JSONArray().apply { put("dns") })
-                put("outboundTag", "proxy")
-            }
-            rules.put(dnsThroughProxyRule)
-
-            val dnsServerIpRule = JSONObject().apply {
-                put("type", "field")
-                put("ip", JSONArray().apply {
-                    put("1.1.1.1")
-                    put("8.8.8.8")
-                    put("1.0.0.1")
-                    put("8.8.4.4")
-                })
-                put("outboundTag", "proxy")
-            }
-            rules.put(dnsServerIpRule)
 
             if (routingMode == "BYPASS_LAN") {
                 val lanIpRule = JSONObject().apply {
